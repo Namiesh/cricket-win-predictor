@@ -1,0 +1,28 @@
+{
+  "model_name": "Logistic Regression",
+  "accuracy": 0.8591,
+  "roc_auc": 0.9424,
+  "log_loss": 0.3035,
+  "brier_score": 0.0966,
+  "training_matches": 2613,
+  "testing_matches": 654,
+  "training_snapshots": 282299,
+  "testing_snapshots": 69674,
+  "training_date_range": "2005-02-17 to 2025-07-20",
+  "testing_date_range": "2025-07-21 to 2026-08-21",
+  "cutoff_date": "2025-07-21",
+  "feature_list": [
+    "batting_team_elo",
+    "bowling_team_elo",
+    "elo_difference",
+    "score",
+    "wickets",
+    "balls_remaining",
+    "target",
+    "runs_required",
+    "wickets_remaining",
+    "current_run_rate",
+    "required_run_rate",
+    "run_rate_difference"
+  ]
+}

@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+*.pyc
+
+.env
+.streamlit/secrets.toml
+
+token.json
+credentials.json
+app.db
+.DS_Store
+
+data/raw/

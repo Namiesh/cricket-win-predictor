@@ -1,0 +1,26 @@
+{
+  "model_name": "Logistic Regression",
+  "accuracy": 0.7041,
+  "roc_auc": 0.7736,
+  "log_loss": 0.5724,
+  "brier_score": 0.1949,
+  "cutoff_date": "2025-07-20",
+  "train_date_range": "2005-02-17 to 2025-07-19",
+  "test_date_range": "2025-07-20 to 2026-08-21",
+  "feature_list": [
+    "team1_elo",
+    "team2_elo",
+    "elo_difference",
+    "team1_win_rate_last5",
+    "team2_win_rate_last5",
+    "team1_win_rate_last10",
+    "team2_win_rate_last10",
+    "team1_avg_runs_last5",
+    "team2_avg_runs_last5",
+    "team1_h2h_win_rate",
+    "h2h_matches_before",
+    "venue_avg_first_innings_score",
+    "venue_batting_first_win_rate",
+    "venue_matches_before"
+  ]
+}
