@@ -2,7 +2,11 @@ import os
 import pandas as pd
 import numpy as np
 from collections import defaultdict
-from src.elo import EloCalculator
+try:
+    from src.elo import EloCalculator
+except ImportError:
+    from elo import EloCalculator
+
 
 
 def generate_prematch_features(matches_path: str, deliveries_path: str, output_path: str):
@@ -42,14 +46,22 @@ def generate_prematch_features(matches_path: str, deliveries_path: str, output_p
 
         team_innings_scores[(m_id, team)] = runs
 
-        if inn_num == 1:
-            first_innings_info[m_id] = (team, runs)
+    # Map match_id -> team scores & conceded runs
+    match_team_runs = {}
+    for _, r_m in df_matches.iterrows():
+        m_id = str(r_m["match_id"])
+        t1, t2 = str(r_m["team1"]), str(r_m["team2"])
+        s1 = team_innings_scores.get((m_id, t1), np.nan)
+        s2 = team_innings_scores.get((m_id, t2), np.nan)
+        match_team_runs[m_id] = {t1: (s1, s2), t2: (s2, s1)}
 
     # 3. Initialize State Trackers for Chronological Computation
-    elo_calc = EloCalculator(k_factor=32.0, initial_elo=1500.0)
+    elo_calc = EloCalculator(k_factor=28.0, initial_elo=1500.0)
 
     team_match_history = defaultdict(list)    # team -> list of 1.0 (win) or 0.0 (loss)
     team_score_history = defaultdict(list)    # team -> list of scores in past matches
+    team_conceded_history = defaultdict(list) # team -> list of conceded runs in past matches
+    team_venue_history = defaultdict(lambda: defaultdict(list)) # venue -> team -> list of wins/losses
     h2h_history = defaultdict(list)           # tuple(sorted([teamA, teamB])) -> list of winner team names
 
     venue_1st_innings_scores = defaultdict(list)  # venue -> list of 1st innings scores
@@ -63,11 +75,15 @@ def generate_prematch_features(matches_path: str, deliveries_path: str, output_p
     # Define model training feature names list
     training_feature_names = [
         "team1_elo", "team2_elo", "elo_difference",
+        "team1_win_rate_last3", "team2_win_rate_last3",
         "team1_win_rate_last5", "team2_win_rate_last5",
         "team1_win_rate_last10", "team2_win_rate_last10",
+        "win_rate_diff_last5", "win_rate_diff_last10",
         "team1_avg_runs_last5", "team2_avg_runs_last5",
+        "team1_avg_conc_last5", "team2_avg_conc_last5", "net_runs_diff5",
         "team1_h2h_win_rate", "h2h_matches_before",
-        "venue_avg_first_innings_score", "venue_batting_first_win_rate", "venue_matches_before"
+        "venue_avg_first_innings_score", "venue_batting_first_win_rate", "venue_matches_before",
+        "team1_ven_win_rate", "team2_ven_win_rate", "team1_toss_won"
     ]
 
     print("Computing chronological pre-match features...")
@@ -79,6 +95,7 @@ def generate_prematch_features(matches_path: str, deliveries_path: str, output_p
         team2 = str(row["team2"])
         venue = str(row["venue"])
         winner = str(row["winner"])
+        toss_winner = str(row.get("toss_winner", ""))
 
         # Target: team1_won (deterministic based on original team order)
         team1_won = 1 if winner == team1 else 0
@@ -90,9 +107,12 @@ def generate_prematch_features(matches_path: str, deliveries_path: str, output_p
         team2_elo = elo_calc.get_rating(team2)
         elo_difference = team1_elo - team2_elo
 
-        # 2. Recent Form Features (Win Rate Last 5 and 10)
+        # 2. Recent Form Features (Win Rate Last 3, 5, 10)
         hist1 = team_match_history[team1]
         hist2 = team_match_history[team2]
+
+        team1_win_rate_last3 = float(np.mean(hist1[-3:])) if len(hist1) > 0 else 0.5
+        team2_win_rate_last3 = float(np.mean(hist2[-3:])) if len(hist2) > 0 else 0.5
 
         team1_win_rate_last5 = float(np.mean(hist1[-5:])) if len(hist1) > 0 else 0.5
         team2_win_rate_last5 = float(np.mean(hist2[-5:])) if len(hist2) > 0 else 0.5
@@ -100,15 +120,31 @@ def generate_prematch_features(matches_path: str, deliveries_path: str, output_p
         team1_win_rate_last10 = float(np.mean(hist1[-10:])) if len(hist1) > 0 else 0.5
         team2_win_rate_last10 = float(np.mean(hist2[-10:])) if len(hist2) > 0 else 0.5
 
-        # 3. Recent Scoring Form Features (Avg Runs Last 5)
-        # Running global prior average for score
+        win_rate_diff_last5 = team1_win_rate_last5 - team2_win_rate_last5
+        win_rate_diff_last10 = team1_win_rate_last10 - team2_win_rate_last10
+
+        # 3. Recent Scoring & Conceding Form Features (Avg Runs / Conceded Last 5)
         global_prior_score = float(np.mean(global_1st_innings_scores)) if len(global_1st_innings_scores) > 0 else 145.0
 
         scores1 = team_score_history[team1]
         scores2 = team_score_history[team2]
+        conc1 = team_conceded_history[team1]
+        conc2 = team_conceded_history[team2]
 
-        team1_avg_runs_last5 = float(np.mean(scores1[-5:])) if len(scores1) > 0 else global_prior_score
-        team2_avg_runs_last5 = float(np.mean(scores2[-5:])) if len(scores2) > 0 else global_prior_score
+        valid_s1 = [s for s in scores1[-5:] if not np.isnan(s)]
+        valid_s2 = [s for s in scores2[-5:] if not np.isnan(s)]
+        valid_c1 = [c for c in conc1[-5:] if not np.isnan(c)]
+        valid_c2 = [c for c in conc2[-5:] if not np.isnan(c)]
+
+        team1_avg_runs_last5 = float(np.mean(valid_s1)) if len(valid_s1) > 0 else global_prior_score
+        team2_avg_runs_last5 = float(np.mean(valid_s2)) if len(valid_s2) > 0 else global_prior_score
+
+        team1_avg_conc_last5 = float(np.mean(valid_c1)) if len(valid_c1) > 0 else global_prior_score
+        team2_avg_conc_last5 = float(np.mean(valid_c2)) if len(valid_c2) > 0 else global_prior_score
+
+        team1_net_runs5 = team1_avg_runs_last5 - team1_avg_conc_last5
+        team2_net_runs5 = team2_avg_runs_last5 - team2_avg_conc_last5
+        net_runs_diff5 = team1_net_runs5 - team2_net_runs5
 
         # 4. Head to Head Features (H2H)
         h2h_key = tuple(sorted([team1, team2]))
@@ -135,6 +171,15 @@ def generate_prematch_features(matches_path: str, deliveries_path: str, output_p
             venue_avg_first_innings_score = float(np.mean(venue_scores))
             venue_batting_first_win_rate = float(np.mean(venue_wins_1st))
 
+        # Team specific venue win rate
+        t1_ven_hist = team_venue_history[venue][team1]
+        t2_ven_hist = team_venue_history[venue][team2]
+        team1_ven_win_rate = float(np.mean(t1_ven_hist)) if len(t1_ven_hist) >= 2 else 0.5
+        team2_ven_win_rate = float(np.mean(t2_ven_hist)) if len(t2_ven_hist) >= 2 else 0.5
+
+        # 6. Toss Feature
+        team1_toss_won = 1.0 if toss_winner == team1 else (0.0 if toss_winner == team2 else 0.5)
+
         # Assemble row dictionary
         feature_row = {
             "match_id": match_id,
@@ -147,14 +192,24 @@ def generate_prematch_features(matches_path: str, deliveries_path: str, output_p
             "team2_elo": round(team2_elo, 2),
             "elo_difference": round(elo_difference, 2),
 
+            "team1_win_rate_last3": round(team1_win_rate_last3, 4),
+            "team2_win_rate_last3": round(team2_win_rate_last3, 4),
+
             "team1_win_rate_last5": round(team1_win_rate_last5, 4),
             "team2_win_rate_last5": round(team2_win_rate_last5, 4),
 
             "team1_win_rate_last10": round(team1_win_rate_last10, 4),
             "team2_win_rate_last10": round(team2_win_rate_last10, 4),
 
+            "win_rate_diff_last5": round(win_rate_diff_last5, 4),
+            "win_rate_diff_last10": round(win_rate_diff_last10, 4),
+
             "team1_avg_runs_last5": round(team1_avg_runs_last5, 2),
             "team2_avg_runs_last5": round(team2_avg_runs_last5, 2),
+
+            "team1_avg_conc_last5": round(team1_avg_conc_last5, 2),
+            "team2_avg_conc_last5": round(team2_avg_conc_last5, 2),
+            "net_runs_diff5": round(net_runs_diff5, 2),
 
             "team1_h2h_win_rate": round(team1_h2h_win_rate, 4),
             "h2h_matches_before": int(h2h_matches_before),
@@ -162,6 +217,10 @@ def generate_prematch_features(matches_path: str, deliveries_path: str, output_p
             "venue_avg_first_innings_score": round(venue_avg_first_innings_score, 2),
             "venue_batting_first_win_rate": round(venue_batting_first_win_rate, 4),
             "venue_matches_before": int(venue_matches_before),
+
+            "team1_ven_win_rate": round(team1_ven_win_rate, 4),
+            "team2_ven_win_rate": round(team2_ven_win_rate, 4),
+            "team1_toss_won": round(team1_toss_won, 2),
 
             "team1_won": int(team1_won)
         }
@@ -176,12 +235,17 @@ def generate_prematch_features(matches_path: str, deliveries_path: str, output_p
         # Update Win History
         team_match_history[team1].append(1.0 if team1_won == 1 else 0.0)
         team_match_history[team2].append(0.0 if team1_won == 1 else 1.0)
+        team_venue_history[venue][team1].append(1.0 if team1_won == 1 else 0.0)
+        team_venue_history[venue][team2].append(0.0 if team1_won == 1 else 1.0)
 
-        # Update Scoring History
-        if (match_id, team1) in team_innings_scores:
-            team_score_history[team1].append(team_innings_scores[(match_id, team1)])
-        if (match_id, team2) in team_innings_scores:
-            team_score_history[team2].append(team_innings_scores[(match_id, team2)])
+        # Update Scoring & Conceded History
+        tr_info = match_team_runs.get(match_id, {})
+        if team1 in tr_info:
+            team_score_history[team1].append(tr_info[team1][0])
+            team_conceded_history[team1].append(tr_info[team1][1])
+        if team2 in tr_info:
+            team_score_history[team2].append(tr_info[team2][0])
+            team_conceded_history[team2].append(tr_info[team2][1])
 
         # Update H2H History
         h2h_history[h2h_key].append(winner)

@@ -68,11 +68,15 @@ def test_predictor_standalone():
     predictor = PreMatchPredictor()
     sample_input = {
         "team1_elo": 1650.0, "team2_elo": 1500.0, "elo_difference": 150.0,
+        "team1_win_rate_last3": 0.8, "team2_win_rate_last3": 0.33,
         "team1_win_rate_last5": 0.8, "team2_win_rate_last5": 0.4,
         "team1_win_rate_last10": 0.7, "team2_win_rate_last10": 0.5,
+        "win_rate_diff_last5": 0.4, "win_rate_diff_last10": 0.2,
         "team1_avg_runs_last5": 168.0, "team2_avg_runs_last5": 142.0,
+        "team1_avg_conc_last5": 140.0, "team2_avg_conc_last5": 165.0, "net_runs_diff5": 51.0,
         "team1_h2h_win_rate": 0.6, "h2h_matches_before": 5,
-        "venue_avg_first_innings_score": 155.0, "venue_batting_first_win_rate": 0.52, "venue_matches_before": 12
+        "venue_avg_first_innings_score": 155.0, "venue_batting_first_win_rate": 0.52, "venue_matches_before": 12,
+        "team1_ven_win_rate": 0.7, "team2_ven_win_rate": 0.4, "team1_toss_won": 1.0
     }
 
     result = predictor.predict_probability(sample_input)
@@ -82,6 +86,7 @@ def test_predictor_standalone():
     assert abs((result['team1_win_probability'] + result['team2_win_probability']) - 1.0) < 1e-4, \
         "Probabilities must sum to 1.0!"
     print("PreMatchPredictor standalone test PASSED!")
+
 
 
 if __name__ == "__main__":

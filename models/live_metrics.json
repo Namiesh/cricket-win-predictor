@@ -1,9 +1,9 @@
 {
-  "model_name": "Logistic Regression",
-  "accuracy": 0.8591,
-  "roc_auc": 0.9424,
-  "log_loss": 0.3035,
-  "brier_score": 0.0966,
+  "model_name": "Weighted Soft Ensemble",
+  "accuracy": 0.8617,
+  "roc_auc": 0.9438,
+  "log_loss": 0.2998,
+  "brier_score": 0.0956,
   "training_matches": 2613,
   "testing_matches": 654,
   "training_snapshots": 282299,
@@ -23,6 +23,13 @@
     "wickets_remaining",
     "current_run_rate",
     "required_run_rate",
-    "run_rate_difference"
+    "run_rate_difference",
+    "rrr_crr_ratio",
+    "runs_per_wicket_needed",
+    "pressure_index",
+    "balls_per_wicket_remaining",
+    "phase_powerplay",
+    "phase_middle",
+    "phase_death"
   ]
 }

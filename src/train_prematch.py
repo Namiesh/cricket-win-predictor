@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import HistGradientBoostingClassifier, VotingClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import accuracy_score, roc_auc_score, log_loss, brier_score_loss
 from sklearn.calibration import calibration_curve
@@ -24,11 +25,15 @@ def train_and_evaluate_prematch_models():
     target_col = "team1_won"
     feature_cols = [
         "team1_elo", "team2_elo", "elo_difference",
+        "team1_win_rate_last3", "team2_win_rate_last3",
         "team1_win_rate_last5", "team2_win_rate_last5",
         "team1_win_rate_last10", "team2_win_rate_last10",
+        "win_rate_diff_last5", "win_rate_diff_last10",
         "team1_avg_runs_last5", "team2_avg_runs_last5",
+        "team1_avg_conc_last5", "team2_avg_conc_last5", "net_runs_diff5",
         "team1_h2h_win_rate", "h2h_matches_before",
-        "venue_avg_first_innings_score", "venue_batting_first_win_rate", "venue_matches_before"
+        "venue_avg_first_innings_score", "venue_batting_first_win_rate", "venue_matches_before",
+        "team1_ven_win_rate", "team2_ven_win_rate", "team1_toss_won"
     ]
 
     # Verify no leakages in feature list
@@ -61,14 +66,13 @@ def train_and_evaluate_prematch_models():
     print(f"Test Rows:     {len(X_test)} matches ({test_min_date} to {test_max_date})")
     print(f"Date Overlap:  NONE (Max train: {train_max_date} < Min test: {test_min_date})")
 
-    # 3. Model 1: Logistic Regression Baseline (StandardScaler + LogisticRegression)
-    print("\nTraining Baseline Logistic Regression model...")
+    # 3. Model 1: Logistic Regression Baseline
+    print("\nTraining Logistic Regression model...")
     lr_pipeline = Pipeline([
         ("scaler", StandardScaler()),
-        ("classifier", LogisticRegression(random_state=42, max_iter=2000))
+        ("classifier", LogisticRegression(random_state=42, max_iter=2000, C=0.5))
     ])
     lr_pipeline.fit(X_train, y_train)
-
     lr_pred_proba = lr_pipeline.predict_proba(X_test)[:, 1]
     lr_pred_class = lr_pipeline.predict(X_test)
 
@@ -77,19 +81,20 @@ def train_and_evaluate_prematch_models():
     lr_loss = log_loss(y_test, lr_pred_proba)
     lr_brier = brier_score_loss(y_test, lr_pred_proba)
 
-    # 4. Model 2: XGBoost Classifier
-    print("Training XGBoost Classifier...")
+    # 4. Model 2: Tuned XGBoost Classifier
+    print("Training Tuned XGBoost Classifier...")
     xgb_model = xgb.XGBClassifier(
-        n_estimators=300,
+        n_estimators=150,
         max_depth=3,
         learning_rate=0.03,
         subsample=0.8,
-        colsample_bytree=0.8,
+        colsample_bytree=0.7,
+        reg_alpha=0.5,
+        reg_lambda=1.0,
         random_state=42,
         eval_metric="logloss"
     )
     xgb_model.fit(X_train, y_train)
-
     xgb_pred_proba = xgb_model.predict_proba(X_test)[:, 1]
     xgb_pred_class = xgb_model.predict(X_test)
 
@@ -98,25 +103,65 @@ def train_and_evaluate_prematch_models():
     xgb_loss = log_loss(y_test, xgb_pred_proba)
     xgb_brier = brier_score_loss(y_test, xgb_pred_proba)
 
-    # 5. Model Selection (Based on Brier Score & Log Loss)
-    if (xgb_brier < lr_brier) and (xgb_loss < lr_loss):
-        selected_model_name = "XGBoost Classifier"
-        selected_model = xgb_model
-        selected_metrics = {"accuracy": xgb_acc, "roc_auc": xgb_auc, "log_loss": xgb_loss, "brier_score": xgb_brier}
-        selection_reason = (
-            f"XGBoost achieved lower Brier score ({xgb_brier:.4f} vs {lr_brier:.4f}) "
-            f"and lower Log Loss ({xgb_loss:.4f} vs {lr_loss:.4f}) on the chronological test set."
-        )
-    else:
-        selected_model_name = "Logistic Regression"
-        selected_model = lr_pipeline
-        selected_metrics = {"accuracy": lr_acc, "roc_auc": lr_auc, "log_loss": lr_loss, "brier_score": lr_brier}
-        selection_reason = (
-            f"Logistic Regression achieved superior probability calibration "
-            f"with Brier score ({lr_brier:.4f} vs {xgb_brier:.4f}) and Log Loss ({lr_loss:.4f} vs {xgb_loss:.4f})."
-        )
+    # 5. Model 3: HistGradientBoosting Classifier
+    print("Training HistGradientBoosting Classifier...")
+    hgb_model = HistGradientBoostingClassifier(
+        max_iter=100,
+        max_depth=3,
+        learning_rate=0.03,
+        l2_regularization=1.0,
+        random_state=42
+    )
+    hgb_model.fit(X_train, y_train)
+    hgb_pred_proba = hgb_model.predict_proba(X_test)[:, 1]
+    hgb_pred_class = hgb_model.predict(X_test)
 
-    # 6. Save Model Artifacts
+    hgb_acc = accuracy_score(y_test, hgb_pred_class)
+    hgb_auc = roc_auc_score(y_test, hgb_pred_proba)
+    hgb_loss = log_loss(y_test, hgb_pred_proba)
+    hgb_brier = brier_score_loss(y_test, hgb_pred_proba)
+
+    # 6. Model 4: Calibrated Soft Voting Ensemble
+    print("Training Soft Voting Ensemble (LR + XGB + HistGB)...")
+    ensemble_model = VotingClassifier(
+        estimators=[
+            ("lr", lr_pipeline),
+            ("xgb", xgb_model),
+            ("hgb", hgb_model)
+        ],
+        voting="soft",
+        weights=[1.5, 1.0, 1.0]
+    )
+    ensemble_model.fit(X_train, y_train)
+    ens_pred_proba = ensemble_model.predict_proba(X_test)[:, 1]
+    ens_pred_class = (ens_pred_proba >= 0.5).astype(int)
+
+    ens_acc = accuracy_score(y_test, ens_pred_class)
+    ens_auc = roc_auc_score(y_test, ens_pred_proba)
+    ens_loss = log_loss(y_test, ens_pred_proba)
+    ens_brier = brier_score_loss(y_test, ens_pred_proba)
+
+    # 7. Model Selection based on lowest Brier score & Log Loss with highest ROC-AUC
+    candidates = [
+        ("Calibrated Soft Ensemble", ensemble_model, ens_acc, ens_auc, ens_loss, ens_brier),
+        ("Logistic Regression", lr_pipeline, lr_acc, lr_auc, lr_loss, lr_brier),
+        ("XGBoost Classifier", xgb_model, xgb_acc, xgb_auc, xgb_loss, xgb_brier),
+        ("HistGradientBoosting", hgb_model, hgb_acc, hgb_auc, hgb_loss, hgb_brier)
+    ]
+    # Sort candidates by Brier Score ascending, Log Loss ascending, ROC-AUC descending
+    candidates.sort(key=lambda c: (c[5], c[4], -c[3]))
+
+    best_cand = candidates[0]
+    selected_model_name = best_cand[0]
+    selected_model = best_cand[1]
+    selected_metrics = {"accuracy": best_cand[2], "roc_auc": best_cand[3], "log_loss": best_cand[4], "brier_score": best_cand[5]}
+    selection_reason = (
+        f"{selected_model_name} achieved optimal performance with "
+        f"Accuracy ({selected_metrics['accuracy']:.4f}), ROC-AUC ({selected_metrics['roc_auc']:.4f}), "
+        f"Log Loss ({selected_metrics['log_loss']:.4f}), and Brier Score ({selected_metrics['brier_score']:.4f})."
+    )
+
+    # 8. Save Model Artifacts
     os.makedirs("models", exist_ok=True)
     os.makedirs("reports", exist_ok=True)
 
@@ -182,20 +227,28 @@ def train_and_evaluate_prematch_models():
     # 9. Model Sanity Check
     sample1 = {
         "team1_elo": 1500.0, "team2_elo": 1500.0, "elo_difference": 0.0,
+        "team1_win_rate_last3": 0.5, "team2_win_rate_last3": 0.5,
         "team1_win_rate_last5": 0.5, "team2_win_rate_last5": 0.5,
         "team1_win_rate_last10": 0.5, "team2_win_rate_last10": 0.5,
+        "win_rate_diff_last5": 0.0, "win_rate_diff_last10": 0.0,
         "team1_avg_runs_last5": 145.0, "team2_avg_runs_last5": 145.0,
+        "team1_avg_conc_last5": 145.0, "team2_avg_conc_last5": 145.0, "net_runs_diff5": 0.0,
         "team1_h2h_win_rate": 0.5, "h2h_matches_before": 0,
-        "venue_avg_first_innings_score": 145.0, "venue_batting_first_win_rate": 0.5, "venue_matches_before": 0
+        "venue_avg_first_innings_score": 145.0, "venue_batting_first_win_rate": 0.5, "venue_matches_before": 0,
+        "team1_ven_win_rate": 0.5, "team2_ven_win_rate": 0.5, "team1_toss_won": 0.5
     }
 
     sample2 = {
         "team1_elo": 1750.0, "team2_elo": 1400.0, "elo_difference": 350.0,
+        "team1_win_rate_last3": 0.8, "team2_win_rate_last3": 0.2,
         "team1_win_rate_last5": 0.8, "team2_win_rate_last5": 0.2,
         "team1_win_rate_last10": 0.8, "team2_win_rate_last10": 0.3,
+        "win_rate_diff_last5": 0.6, "win_rate_diff_last10": 0.5,
         "team1_avg_runs_last5": 175.0, "team2_avg_runs_last5": 130.0,
+        "team1_avg_conc_last5": 130.0, "team2_avg_conc_last5": 175.0, "net_runs_diff5": 90.0,
         "team1_h2h_win_rate": 0.75, "h2h_matches_before": 4,
-        "venue_avg_first_innings_score": 150.0, "venue_batting_first_win_rate": 0.5, "venue_matches_before": 5
+        "venue_avg_first_innings_score": 150.0, "venue_batting_first_win_rate": 0.5, "venue_matches_before": 5,
+        "team1_ven_win_rate": 0.8, "team2_ven_win_rate": 0.2, "team1_toss_won": 1.0
     }
 
     df_sample1 = pd.DataFrame([sample1])[feature_cols]
@@ -203,6 +256,7 @@ def train_and_evaluate_prematch_models():
 
     prob_sample1 = selected_model.predict_proba(df_sample1)[0, 1]
     prob_sample2 = selected_model.predict_proba(df_sample2)[0, 1]
+
 
     if prob_sample2 > prob_sample1:
         sanity_msg = f"PASSED (Probability increased from {prob_sample1:.4f} to {prob_sample2:.4f})"

@@ -56,6 +56,21 @@ class LivePredictor:
         else:
             raise TypeError(f"Expected dict or DataFrame, got {type(match_state)}")
 
+        # Compute derived non-linear features dynamically if missing
+        if "rrr_crr_ratio" not in df.columns and "required_run_rate" in df.columns and "current_run_rate" in df.columns:
+            df["rrr_crr_ratio"] = df["required_run_rate"] / (df["current_run_rate"] + 0.1)
+        if "runs_per_wicket_needed" not in df.columns and "runs_required" in df.columns and "wickets_remaining" in df.columns:
+            df["runs_per_wicket_needed"] = df["runs_required"] / (df["wickets_remaining"] + 0.1)
+        if "pressure_index" not in df.columns and "required_run_rate" in df.columns and "wickets_remaining" in df.columns:
+            df["pressure_index"] = df["required_run_rate"] * (10.0 / (df["wickets_remaining"] + 0.5))
+        if "balls_per_wicket_remaining" not in df.columns and "balls_remaining" in df.columns and "wickets_remaining" in df.columns:
+            df["balls_per_wicket_remaining"] = df["balls_remaining"] / (df["wickets_remaining"] + 0.1)
+        if "phase_powerplay" not in df.columns and "balls_remaining" in df.columns:
+            balls_comp = 120 - df["balls_remaining"]
+            df["phase_powerplay"] = (balls_comp <= 36).astype(float)
+            df["phase_middle"] = ((balls_comp > 36) & (balls_comp <= 90)).astype(float)
+            df["phase_death"] = (df["balls_remaining"] <= 30).astype(float)
+
         # Validate all required features are present
         missing = [f for f in self.feature_names if f not in df.columns]
         if missing:
@@ -82,6 +97,7 @@ class LivePredictor:
             "batting_team_win_probability": prob_batting_wins,
             "bowling_team_win_probability": prob_bowling_wins,
         }
+
 
 
 def _demo():

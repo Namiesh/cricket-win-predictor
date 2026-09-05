@@ -81,11 +81,21 @@ def compute_target_match_features(target_team1: str, target_team2: str, target_v
         if inn_num == 1:
             first_innings_info[m_id] = (team, runs)
 
+    match_team_runs = {}
+    for _, r_m in df_matches.iterrows():
+        m_id = str(r_m["match_id"])
+        t1, t2 = str(r_m["team1"]), str(r_m["team2"])
+        s1 = team_innings_scores.get((m_id, t1), np.nan)
+        s2 = team_innings_scores.get((m_id, t2), np.nan)
+        match_team_runs[m_id] = {t1: (s1, s2), t2: (s2, s1)}
+
     # Initialize State Trackers for Chronological Computation
-    elo_calc = EloCalculator(k_factor=32.0, initial_elo=1500.0)
+    elo_calc = EloCalculator(k_factor=28.0, initial_elo=1500.0)
 
     team_match_history = defaultdict(list)
     team_score_history = defaultdict(list)
+    team_conceded_history = defaultdict(list)
+    team_venue_history = defaultdict(lambda: defaultdict(list))
     h2h_history = defaultdict(list)
 
     venue_1st_innings_scores = defaultdict(list)
@@ -110,12 +120,17 @@ def compute_target_match_features(target_team1: str, target_team2: str, target_v
         # Update Win History
         team_match_history[team1].append(1.0 if team1_won == 1.0 else 0.0)
         team_match_history[team2].append(0.0 if team1_won == 1.0 else 1.0)
+        team_venue_history[venue][team1].append(1.0 if team1_won == 1.0 else 0.0)
+        team_venue_history[venue][team2].append(0.0 if team1_won == 1.0 else 1.0)
 
-        # Update Scoring History
-        if (match_id, team1) in team_innings_scores:
-            team_score_history[team1].append(team_innings_scores[(match_id, team1)])
-        if (match_id, team2) in team_innings_scores:
-            team_score_history[team2].append(team_innings_scores[(match_id, team2)])
+        # Update Scoring & Conceded History
+        tr_info = match_team_runs.get(match_id, {})
+        if team1 in tr_info:
+            team_score_history[team1].append(tr_info[team1][0])
+            team_conceded_history[team1].append(tr_info[team1][1])
+        if team2 in tr_info:
+            team_score_history[team2].append(tr_info[team2][0])
+            team_conceded_history[team2].append(tr_info[team2][1])
 
         # Update H2H History
         h2h_key = tuple(sorted([team1, team2]))
@@ -140,18 +155,38 @@ def compute_target_match_features(target_team1: str, target_team2: str, target_v
     hist1 = team_match_history[target_team1]
     hist2 = team_match_history[target_team2]
 
+    team1_win_rate_last3 = float(np.mean(hist1[-3:])) if len(hist1) > 0 else 0.5
+    team2_win_rate_last3 = float(np.mean(hist2[-3:])) if len(hist2) > 0 else 0.5
+
     team1_win_rate_last5 = float(np.mean(hist1[-5:])) if len(hist1) > 0 else 0.5
     team2_win_rate_last5 = float(np.mean(hist2[-5:])) if len(hist2) > 0 else 0.5
 
     team1_win_rate_last10 = float(np.mean(hist1[-10:])) if len(hist1) > 0 else 0.5
     team2_win_rate_last10 = float(np.mean(hist2[-10:])) if len(hist2) > 0 else 0.5
 
+    win_rate_diff_last5 = team1_win_rate_last5 - team2_win_rate_last5
+    win_rate_diff_last10 = team1_win_rate_last10 - team2_win_rate_last10
+
     global_prior_score = float(np.mean(global_1st_innings_scores)) if len(global_1st_innings_scores) > 0 else 145.0
     scores1 = team_score_history[target_team1]
     scores2 = team_score_history[target_team2]
+    conc1 = team_conceded_history[target_team1]
+    conc2 = team_conceded_history[target_team2]
 
-    team1_avg_runs_last5 = float(np.mean(scores1[-5:])) if len(scores1) > 0 else global_prior_score
-    team2_avg_runs_last5 = float(np.mean(scores2[-5:])) if len(scores2) > 0 else global_prior_score
+    valid_s1 = [s for s in scores1[-5:] if not np.isnan(s)]
+    valid_s2 = [s for s in scores2[-5:] if not np.isnan(s)]
+    valid_c1 = [c for c in conc1[-5:] if not np.isnan(c)]
+    valid_c2 = [c for c in conc2[-5:] if not np.isnan(c)]
+
+    team1_avg_runs_last5 = float(np.mean(valid_s1)) if len(valid_s1) > 0 else global_prior_score
+    team2_avg_runs_last5 = float(np.mean(valid_s2)) if len(valid_s2) > 0 else global_prior_score
+
+    team1_avg_conc_last5 = float(np.mean(valid_c1)) if len(valid_c1) > 0 else global_prior_score
+    team2_avg_conc_last5 = float(np.mean(valid_c2)) if len(valid_c2) > 0 else global_prior_score
+
+    team1_net_runs5 = team1_avg_runs_last5 - team1_avg_conc_last5
+    team2_net_runs5 = team2_avg_runs_last5 - team2_avg_conc_last5
+    net_runs_diff5 = team1_net_runs5 - team2_net_runs5
 
     target_h2h_key = tuple(sorted([target_team1, target_team2]))
     past_h2h = h2h_history[target_h2h_key]
@@ -179,10 +214,20 @@ def compute_target_match_features(target_team1: str, target_team2: str, target_v
         venue_batting_first_win_rate = float(np.mean(venue_wins_1st))
         venue_info_label = f"Venue Specific ({venue_matches_before} historical matches)"
 
+    t1_ven_hist = team_venue_history[resolved_venue][target_team1]
+    t2_ven_hist = team_venue_history[resolved_venue][target_team2]
+    team1_ven_win_rate = float(np.mean(t1_ven_hist)) if len(t1_ven_hist) >= 2 else 0.5
+    team2_ven_win_rate = float(np.mean(t2_ven_hist)) if len(t2_ven_hist) >= 2 else 0.5
+
+    team1_toss_won = 0.5
+
     features = {
         "team1_elo": round(team1_elo, 2),
         "team2_elo": round(team2_elo, 2),
         "elo_difference": round(elo_difference, 2),
+
+        "team1_win_rate_last3": round(team1_win_rate_last3, 4),
+        "team2_win_rate_last3": round(team2_win_rate_last3, 4),
 
         "team1_win_rate_last5": round(team1_win_rate_last5, 4),
         "team2_win_rate_last5": round(team2_win_rate_last5, 4),
@@ -190,16 +235,28 @@ def compute_target_match_features(target_team1: str, target_team2: str, target_v
         "team1_win_rate_last10": round(team1_win_rate_last10, 4),
         "team2_win_rate_last10": round(team2_win_rate_last10, 4),
 
+        "win_rate_diff_last5": round(win_rate_diff_last5, 4),
+        "win_rate_diff_last10": round(win_rate_diff_last10, 4),
+
         "team1_avg_runs_last5": round(team1_avg_runs_last5, 2),
         "team2_avg_runs_last5": round(team2_avg_runs_last5, 2),
+
+        "team1_avg_conc_last5": round(team1_avg_conc_last5, 2),
+        "team2_avg_conc_last5": round(team2_avg_conc_last5, 2),
+        "net_runs_diff5": round(net_runs_diff5, 2),
 
         "team1_h2h_win_rate": round(team1_h2h_win_rate, 4),
         "h2h_matches_before": int(h2h_matches_before),
 
         "venue_avg_first_innings_score": round(venue_avg_first_innings_score, 2),
         "venue_batting_first_win_rate": round(venue_batting_first_win_rate, 4),
-        "venue_matches_before": int(venue_matches_before)
+        "venue_matches_before": int(venue_matches_before),
+
+        "team1_ven_win_rate": round(team1_ven_win_rate, 4),
+        "team2_ven_win_rate": round(team2_ven_win_rate, 4),
+        "team1_toss_won": round(team1_toss_won, 2)
     }
+
 
     venue_metadata = {
         "requested_venue": target_venue,

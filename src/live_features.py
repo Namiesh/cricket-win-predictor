@@ -18,7 +18,11 @@ import time
 import numpy as np
 import pandas as pd
 from collections import defaultdict
-from src.elo import EloCalculator
+try:
+    from src.elo import EloCalculator
+except ImportError:
+    from elo import EloCalculator
+
 
 
 # ── Wicket types that count as an actual dismissal ───────────────────────────
@@ -265,6 +269,14 @@ def generate_live_features():
 
                 run_rate_difference = round(current_run_rate - required_run_rate, 4)
 
+                rrr_crr_ratio = round(required_run_rate / (current_run_rate + 0.1), 4)
+                runs_per_wicket_needed = round(runs_required / (wickets_remaining + 0.1), 4)
+                pressure_index = round(required_run_rate * (10.0 / (wickets_remaining + 0.5)), 4)
+                balls_per_wicket_remaining = round(balls_remaining / (wickets_remaining + 0.1), 4)
+                phase_powerplay = 1.0 if legal_balls <= 36 else 0.0
+                phase_middle = 1.0 if 36 < legal_balls <= 90 else 0.0
+                phase_death = 1.0 if balls_remaining <= 30 else 0.0
+
                 snapshot_rows.append({
                     "match_id": mid,
                     "match_date": match_date,
@@ -284,8 +296,16 @@ def generate_live_features():
                     "current_run_rate": current_run_rate,
                     "required_run_rate": required_run_rate,
                     "run_rate_difference": run_rate_difference,
+                    "rrr_crr_ratio": rrr_crr_ratio,
+                    "runs_per_wicket_needed": runs_per_wicket_needed,
+                    "pressure_index": pressure_index,
+                    "balls_per_wicket_remaining": balls_per_wicket_remaining,
+                    "phase_powerplay": phase_powerplay,
+                    "phase_middle": phase_middle,
+                    "phase_death": phase_death,
                     "batting_team_won": batting_team_won,
                 })
+
 
             matches_processed += 1
 

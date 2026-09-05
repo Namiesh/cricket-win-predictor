@@ -21,6 +21,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import VotingClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import (
@@ -28,6 +29,7 @@ from sklearn.metrics import (
 )
 from sklearn.calibration import calibration_curve
 from xgboost import XGBClassifier
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -47,7 +49,15 @@ FEATURE_COLS = [
     "current_run_rate",
     "required_run_rate",
     "run_rate_difference",
+    "rrr_crr_ratio",
+    "runs_per_wicket_needed",
+    "pressure_index",
+    "balls_per_wicket_remaining",
+    "phase_powerplay",
+    "phase_middle",
+    "phase_death",
 ]
+
 
 TARGET_COL = "batting_team_won"
 
@@ -155,11 +165,11 @@ def train_live_model():
     y_test = df_test[TARGET_COL].values
 
     # ── Part 4: Logistic Regression Baseline ─────────────────────────────────
-    print(f"\nTraining Logistic Regression...")
+    print(f"\nTraining Logistic Regression (C=0.2)...")
     t_lr = time.time()
     lr_pipeline = Pipeline([
         ("scaler", StandardScaler()),
-        ("lr", LogisticRegression(max_iter=2000, random_state=42)),
+        ("lr", LogisticRegression(max_iter=2000, C=0.2, random_state=42)),
     ])
     lr_pipeline.fit(X_train, y_train)
     lr_time = time.time() - t_lr
@@ -178,15 +188,17 @@ def train_live_model():
     print(f"  Brier Score: {lr_bs:.4f}")
     print(f"  Time:        {lr_time:.2f}s")
 
-    # ── Part 5: XGBoost ──────────────────────────────────────────────────────
-    print(f"\nTraining XGBoost...")
+    # ── Part 5: Tuned XGBoost ────────────────────────────────────────────────
+    print(f"\nTraining Tuned XGBoost...")
     t_xgb = time.time()
     xgb_model = XGBClassifier(
         n_estimators=250,
         max_depth=4,
-        learning_rate=0.05,
+        learning_rate=0.03,
         subsample=0.8,
         colsample_bytree=0.8,
+        reg_alpha=0.2,
+        reg_lambda=1.5,
         random_state=42,
         eval_metric="logloss",
         n_jobs=-1,
@@ -208,16 +220,44 @@ def train_live_model():
     print(f"  Brier Score: {xgb_bs:.4f}")
     print(f"  Time:        {xgb_time:.2f}s")
 
+    # ── Part 5B: Calibrated Soft Ensemble ─────────────────────────────────────
+    print(f"\nTraining Calibrated Soft Ensemble (LR + XGBoost)...")
+    t_ens = time.time()
+    ensemble_model = VotingClassifier(
+        estimators=[
+            ("lr", lr_pipeline),
+            ("xgb", xgb_model)
+        ],
+        voting="soft",
+        weights=[2.0, 1.0]
+    )
+    ensemble_model.fit(X_train, y_train)
+    ens_time = time.time() - t_ens
+
+    ens_proba = ensemble_model.predict_proba(X_test)[:, 1]
+    ens_pred = (ens_proba >= 0.5).astype(int)
+
+    ens_acc = accuracy_score(y_test, ens_pred)
+    ens_auc = roc_auc_score(y_test, ens_proba)
+    ens_ll = log_loss(y_test, ens_proba)
+    ens_bs = brier_score_loss(y_test, ens_proba)
+
+    print(f"  Accuracy:    {ens_acc:.4f}")
+    print(f"  ROC-AUC:     {ens_auc:.4f}")
+    print(f"  Log Loss:    {ens_ll:.4f}")
+    print(f"  Brier Score: {ens_bs:.4f}")
+    print(f"  Time:        {ens_time:.2f}s")
+
     # ── Part 6: Evaluation Table ─────────────────────────────────────────────
     print(f"\n{'='*60}")
     print("MODEL COMPARISON")
     print(f"{'='*60}")
-    print(f"{'Metric':<20} {'Logistic Regression':>20} {'XGBoost':>15}")
-    print("-" * 60)
-    print(f"{'Accuracy':<20} {lr_acc:>20.4f} {xgb_acc:>15.4f}")
-    print(f"{'ROC-AUC':<20} {lr_auc:>20.4f} {xgb_auc:>15.4f}")
-    print(f"{'Log Loss':<20} {lr_ll:>20.4f} {xgb_ll:>15.4f}")
-    print(f"{'Brier Score':<20} {lr_bs:>20.4f} {xgb_bs:>15.4f}")
+    print(f"{'Metric':<18} {'Logistic Regression':>18} {'XGBoost':>12} {'Ensemble':>12}")
+    print("-" * 65)
+    print(f"{'Accuracy':<18} {lr_acc:>18.4f} {xgb_acc:>12.4f} {ens_acc:>12.4f}")
+    print(f"{'ROC-AUC':<18} {lr_auc:>18.4f} {xgb_auc:>12.4f} {ens_auc:>12.4f}")
+    print(f"{'Log Loss':<18} {lr_ll:>18.4f} {xgb_ll:>12.4f} {ens_ll:>12.4f}")
+    print(f"{'Brier Score':<18} {lr_bs:>18.4f} {xgb_bs:>12.4f} {ens_bs:>12.4f}")
 
     # ── Part 7: Calibration Curves ───────────────────────────────────────────
     os.makedirs("reports", exist_ok=True)
@@ -234,13 +274,13 @@ def train_live_model():
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
 
-    # XGB calibration
-    xgb_frac_pos, xgb_mean_pred = calibration_curve(y_test, xgb_proba, n_bins=10, strategy="uniform")
-    axes[1].plot(xgb_mean_pred, xgb_frac_pos, "o-", color="orange", label="XGBoost")
+    # Ensemble calibration
+    ens_frac_pos, ens_mean_pred = calibration_curve(y_test, ens_proba, n_bins=10, strategy="uniform")
+    axes[1].plot(ens_mean_pred, ens_frac_pos, "o-", color="orange", label="Soft Ensemble")
     axes[1].plot([0, 1], [0, 1], "k--", label="Perfectly Calibrated")
     axes[1].set_xlabel("Mean Predicted Probability")
     axes[1].set_ylabel("Fraction of Positives")
-    axes[1].set_title("XGBoost Calibration")
+    axes[1].set_title("Calibrated Ensemble Calibration")
     axes[1].legend()
     axes[1].grid(True, alpha=0.3)
 
@@ -250,22 +290,13 @@ def train_live_model():
     plt.close()
     print(f"\nCalibration plot saved: {cal_path}")
 
-    # Calibration summary
-    print(f"\nCalibration Summary (10 bins):")
-    print(f"  LR  bins: predicted={[round(x,3) for x in lr_mean_pred]}")
-    print(f"  LR  bins: actual   ={[round(x,3) for x in lr_frac_pos]}")
-    print(f"  XGB bins: predicted={[round(x,3) for x in xgb_mean_pred]}")
-    print(f"  XGB bins: actual   ={[round(x,3) for x in xgb_frac_pos]}")
-
     # ── Part 8: Match-Progress Analysis ──────────────────────────────────────
     print(f"\n{'='*60}")
     print("MATCH-PROGRESS ANALYSIS (TEST SET)")
     print(f"{'='*60}")
 
-    # Use balls_completed for stage identification
     df_test_with_proba = df_test.copy()
-    df_test_with_proba["xgb_proba"] = xgb_proba
-    df_test_with_proba["lr_proba"] = lr_proba
+    df_test_with_proba["ens_proba"] = ens_proba
 
     progress_results = {}
     for stage_name, (ball_min, ball_max) in PROGRESS_STAGES.items():
@@ -278,19 +309,15 @@ def train_live_model():
             continue
 
         stage_y = stage_df[TARGET_COL].values
-        stage_xgb_p = stage_df["xgb_proba"].values
-        stage_lr_p = stage_df["lr_proba"].values
-
-        # Use the selected model's probabilities (we'll determine selection later,
-        # but report XGBoost here as it's the primary candidate)
-        stage_pred = (stage_xgb_p >= 0.5).astype(int)
+        stage_ens_p = stage_df["ens_proba"].values
+        stage_pred = (stage_ens_p >= 0.5).astype(int)
 
         progress_results[stage_name] = {
             "n_snapshots": len(stage_df),
-            "avg_pred_prob": float(np.mean(stage_xgb_p)),
+            "avg_pred_prob": float(np.mean(stage_ens_p)),
             "accuracy": float(accuracy_score(stage_y, stage_pred)),
-            "brier": float(brier_score_loss(stage_y, stage_xgb_p)),
-            "logloss": float(log_loss(stage_y, stage_xgb_p)),
+            "brier": float(brier_score_loss(stage_y, stage_ens_p)),
+            "logloss": float(log_loss(stage_y, stage_ens_p)),
         }
 
     print(f"{'Stage':<15} {'Snapshots':>10} {'Avg Prob':>10} {'Accuracy':>10} {'Brier':>10} {'LogLoss':>10}")
@@ -304,7 +331,7 @@ def train_live_model():
 
     # ── Part 9: Feature Importance ───────────────────────────────────────────
     print(f"\n{'='*60}")
-    print("FEATURE IMPORTANCE (XGBoost)")
+    print("FEATURE IMPORTANCE (XGBoost Component)")
     print(f"{'='*60}")
 
     importance = xgb_model.feature_importances_
@@ -330,51 +357,22 @@ def train_live_model():
     print(f"\nFeature importance plot saved: {imp_path}")
 
     # ── Part 10: Model Selection ─────────────────────────────────────────────
-    # Criteria: Brier Score (lower=better), Log Loss (lower=better),
-    #           ROC-AUC (higher=better), Calibration visual
-    xgb_score = 0
-    lr_score = 0
+    candidates = [
+        ("Weighted Soft Ensemble", ensemble_model, ens_acc, ens_auc, ens_ll, ens_bs),
+        ("Logistic Regression", lr_pipeline, lr_acc, lr_auc, lr_ll, lr_bs),
+        ("Tuned XGBoost", xgb_model, xgb_acc, xgb_auc, xgb_ll, xgb_bs),
+    ]
+    candidates.sort(key=lambda c: (c[5], c[4], -c[2]))
 
-    if xgb_bs < lr_bs:
-        xgb_score += 1
-    else:
-        lr_score += 1
+    best_cand = candidates[0]
+    selected_model_name = best_cand[0]
+    selected_model = best_cand[1]
+    selected_reason = (
+        f"{selected_model_name} achieved highest performance across test snapshots "
+        f"(Brier: {best_cand[5]:.4f}, LogLoss: {best_cand[4]:.4f}, "
+        f"ROC-AUC: {best_cand[3]:.4f}, Accuracy: {best_cand[2]:.4f})"
+    )
 
-    if xgb_ll < lr_ll:
-        xgb_score += 1
-    else:
-        lr_score += 1
-
-    if xgb_auc > lr_auc:
-        xgb_score += 1
-    else:
-        lr_score += 1
-
-    if xgb_acc > lr_acc:
-        xgb_score += 1
-    else:
-        lr_score += 1
-
-    if xgb_score > lr_score:
-        selected_model_name = "XGBoost"
-        selected_model = xgb_model
-        selected_reason = (
-            f"XGBoost wins on {xgb_score}/4 metrics "
-            f"(Brier: {xgb_bs:.4f} vs {lr_bs:.4f}, "
-            f"LogLoss: {xgb_ll:.4f} vs {lr_ll:.4f}, "
-            f"ROC-AUC: {xgb_auc:.4f} vs {lr_auc:.4f}, "
-            f"Accuracy: {xgb_acc:.4f} vs {lr_acc:.4f})"
-        )
-    else:
-        selected_model_name = "Logistic Regression"
-        selected_model = lr_pipeline
-        selected_reason = (
-            f"Logistic Regression wins on {lr_score}/4 metrics "
-            f"(Brier: {lr_bs:.4f} vs {xgb_bs:.4f}, "
-            f"LogLoss: {lr_ll:.4f} vs {xgb_ll:.4f}, "
-            f"ROC-AUC: {lr_auc:.4f} vs {xgb_auc:.4f}, "
-            f"Accuracy: {lr_acc:.4f} vs {xgb_acc:.4f})"
-        )
 
     print(f"\n{'='*60}")
     print("MODEL SELECTION")
@@ -421,14 +419,14 @@ def train_live_model():
 
     # Pick 3 test matches with varying outcomes
     test_match_list = sorted(test_match_ids)
-    # Pick early, middle, late
     sanity_mids = [
         test_match_list[0],
         test_match_list[len(test_match_list) // 2],
         test_match_list[-1],
     ]
 
-    selected_proba_col = "xgb_proba" if selected_model_name == "XGBoost" else "lr_proba"
+    selected_proba_col = "ens_proba"
+
 
     for s_mid in sanity_mids:
         s_df = df_test_with_proba[df_test_with_proba["match_id"] == s_mid]
