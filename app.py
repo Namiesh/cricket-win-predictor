@@ -716,10 +716,16 @@ else:
     elo_calc = get_cached_elo_calc()
     live_pred = load_live_predictor_model()
 
-    api_response = None
-    if client.is_configured():
-        with st.spinner("Connecting to CricketData.org API..."):
-            api_response = client.fetch_current_matches()
+    # Cache API response in session state to prevent API refetch resets on dropdown selection
+    if "api_live_matches_cache" not in st.session_state or fetch_btn:
+        if client.is_configured():
+            with st.spinner("Connecting to CricketData.org API..."):
+                api_response = client.fetch_current_matches()
+                st.session_state["api_live_matches_cache"] = api_response
+        else:
+            st.session_state["api_live_matches_cache"] = None
+
+    api_response = st.session_state.get("api_live_matches_cache")
 
     raw_matches = []
     api_success = False
@@ -732,12 +738,31 @@ else:
     if api_success and len(matches_list) > 0:
         st.success(f"✅ Connected to CricketData API — {len(matches_list)} active live match(es) in progress.")
 
-        # Dropdown selector
+        # Dropdown selector with explicit session key to preserve selected match
         match_labels = [f"{m.get('name', 'Match')} [{str(m.get('matchType', 'T20')).upper()}] — {m.get('status', 'In Progress')}" for m in matches_list]
-        selected_match_idx = st.selectbox("Select Active Live Match in Progress:", range(len(matches_list)), format_func=lambda i: match_labels[i])
+        selected_match_idx = st.selectbox(
+            "Select Active Live Match in Progress:",
+            range(len(matches_list)),
+            format_func=lambda i: match_labels[i],
+            key="live_api_selected_match_index"
+        )
 
         curr_match = matches_list[selected_match_idx]
+
+        # Fetch detailed match_info if match ID is present to ensure full detailed score
+        match_id = curr_match.get("id")
+        if match_id:
+            info_cache_key = f"match_info_{match_id}"
+            if info_cache_key not in st.session_state or fetch_btn:
+                info_resp = client.fetch_match_info(match_id)
+                if info_resp and info_resp.get("status") == "success":
+                    st.session_state[info_cache_key] = info_resp.get("data", curr_match)
+                else:
+                    st.session_state[info_cache_key] = curr_match
+            curr_match = st.session_state.get(info_cache_key, curr_match)
+
         features = extract_live_match_state(curr_match, elo_calc)
+
 
         if live_pred:
             pred = live_pred.predict(features)
